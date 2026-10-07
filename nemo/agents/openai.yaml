@@ -1,0 +1,6 @@
+interface:
+  display_name: "Nemo (Nemotron 3 Ultra)"
+  short_description: "Delega rascunhos, testes, resumos e revisões ao Nemotron. Uso explícito: $nemo on|off|status|test"
+
+policy:
+  allow_implicit_invocation: false

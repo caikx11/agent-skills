@@ -1,0 +1,6 @@
+interface:
+  display_name: "Free (FreeLLMAPI)"
+  short_description: "Delega rascunhos, testes, resumos e revisões aos modelos grátis do FreeLLMAPI. Uso explícito: $free on|off|status|test"
+
+policy:
+  allow_implicit_invocation: false

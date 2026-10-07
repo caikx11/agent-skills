@@ -1,0 +1,6 @@
+interface:
+  display_name: "Laya (local)"
+  short_description: "Decisões choice/score/noul com o Laya no seu PC. Uso explícito: $laya on|off|status|tasks|ask"
+
+policy:
+  allow_implicit_invocation: false

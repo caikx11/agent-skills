@@ -1,0 +1,6 @@
+interface:
+  display_name: "Jev (TypeSafe)"
+  short_description: "Decisões choice/score/noul com o Jev. Uso explícito: $jev on|off|status|test"
+
+policy:
+  allow_implicit_invocation: false
