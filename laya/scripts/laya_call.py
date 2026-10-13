@@ -11,7 +11,11 @@ Subcomandos:
   new-task NOME < schema.json Cria a tarefa. O JSON é {"questions": {...}}.
   ask NOME [--teacher]        Lê {"state": ...} no stdin e decide com o Laya.
                               --teacher também pergunta ao Jev e guarda como exemplo.
+                              Modo sombra: {"state": ..., "shadow": {...}} traz a decisão do
+                              modelo principal; vira exemplo e o histórico registra se concordaram.
   correct NOME                Lê {"state": ..., "answers": {...}} no stdin e guarda a correção.
+  stats NOME [--last N]       Taxa de concordância Laya x principal nas últimas N sombras
+                              (padrão 50) e grava a acurácia no registro.
   export NOME                 Gera dataset.jsonl da tarefa para treinar no Kaggle/Colab.
   import-model NOME REPO_ID   Baixa o modelo ajustado do Hub para a pasta da tarefa.
   set-calibration NOME < json Guarda as temperaturas ajustadas, ex.: {"choice_3": 1.7}.
@@ -134,6 +138,30 @@ def analyze(answers):
     return {"needs_review": bool(flags), "flags": flags}
 
 
+def answer_label(ans):
+    """Extrai o rótulo de uma resposta do Laya (o formato exato varia entre versões)."""
+    if isinstance(ans, dict):
+        for key in ("answer", "choice", "label", "value", "score", "noul"):
+            if key in ans:
+                ans = ans[key]
+                break
+        else:
+            probs = ans.get("probabilities")
+            if isinstance(probs, dict) and probs:
+                ans = max(probs, key=lambda k: float(probs[k]))
+    if isinstance(ans, float) and 0.0 <= ans <= 1.0 and ans not in (0.0, 1.0):
+        return ans >= 0.5  # noul como probabilidade
+    return ans
+
+
+def same_answer(laya_ans, principal_ans):
+    a, b = answer_label(laya_ans), principal_ans
+    if isinstance(a, bool) or isinstance(b, bool):
+        truthy = {"sim", "yes", "true", "1"}
+        return (str(a).lower() in truthy or a is True) == (str(b).lower() in truthy or b is True)
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
 # ---- Comandos ----------------------------------------------------------------------------
 def cmd_status():
     try:
@@ -226,6 +254,10 @@ def cmd_ask(name, use_teacher):
         state = req["state"]
     except (KeyError, TypeError, json.JSONDecodeError):
         fail("JSON precisa ter 'state'", 64)
+    shadow = req.get("shadow")
+    if shadow is not None:
+        if not isinstance(shadow, dict) or not shadow or not set(shadow) <= set(questions):
+            fail("'shadow' precisa ser um objeto com respostas para perguntas da tarefa", 64)
     agent, modo = load_agent(name)
     started = time.monotonic()
     result = agent.predict(state, questions)
@@ -234,8 +266,18 @@ def cmd_ask(name, use_teacher):
     out = {"ok": True, "tarefa": name, "modo": modo, "answers": answers,
            "routing": result.get("routing") if isinstance(result, dict) else None,
            "elapsed_ms": elapsed, **analyze(answers)}
-    append_jsonl(d / "history.jsonl", {"ts": now(), "modo": modo, "state_chars": len(str(state)),
-                                       "answers": answers, "flags": out["flags"]})
+    record = {"ts": now(), "modo": modo, "state_chars": len(str(state)),
+              "answers": answers, "flags": out["flags"]}
+    if shadow is not None:
+        agreed = {qid: same_answer((answers or {}).get(qid), val) for qid, val in shadow.items()}
+        record["shadow"] = True
+        record["concordou"] = agreed
+        out["shadow"] = {"concordou": agreed, "laya": {q: answer_label((answers or {}).get(q)) for q in shadow},
+                         "principal": shadow}
+        append_jsonl(d / "examples.jsonl", {"ts": now(), "source": "principal", "state": state,
+                                            "answers": shadow})
+        out["exemplos_total"] = count_lines(d / "examples.jsonl")
+    append_jsonl(d / "history.jsonl", record)
     if use_teacher:
         teacher = run_teacher(state, questions)
         out["teacher"] = {"ok": teacher.get("ok"), "model": teacher.get("model"),
@@ -301,6 +343,40 @@ def cmd_import_model(name, repo_id):
     emit({"ok": True, "tarefa": name, "modelo": repo_id, "pasta": str(target)})
 
 
+def cmd_stats(name, last):
+    reg, info = get_task(name)
+    path = task_dir(name) / "history.jsonl"
+    rows = []
+    if path.exists():
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("shadow") and isinstance(row.get("concordou"), dict):
+                    rows.append(row)
+    modo = "ajustado" if has_tuned_model(name) else "zero-shot"
+    rows = [r for r in rows if r.get("modo") == modo][-last:]
+    if not rows:
+        emit({"ok": True, "tarefa": name, "modo": modo, "amostras": 0,
+              "message": "nenhuma decisão em modo sombra ainda com o modelo atual"})
+    per_q = {}
+    for r in rows:
+        for qid, ok in r["concordou"].items():
+            hit, total = per_q.get(qid, (0, 0))
+            per_q[qid] = (hit + bool(ok), total + 1)
+    all_ok = sum(all(r["concordou"].values()) for r in rows)
+    accuracy = round(all_ok / len(rows), 3)
+    info["accuracy"] = {"valor": accuracy, "amostras": len(rows), "modo": modo,
+                        "fonte": "sombra", "ts": now()}
+    save_registry(reg)
+    emit({"ok": True, "tarefa": name, "modo": modo, "amostras": len(rows),
+          "concordancia_total": accuracy,
+          "por_pergunta": {q: round(h / t, 3) for q, (h, t) in per_q.items()},
+          "pronto": accuracy >= 0.85 and len(rows) >= 50})
+
+
 def cmd_set_calibration(name):
     reg, info = get_task(name)
     try:
@@ -314,7 +390,7 @@ def cmd_set_calibration(name):
 
 
 def main(argv):
-    usage = "uso: laya_call.py status|init|tasks|new-task N|ask N [--teacher]|correct N|export N|import-model N REPO|set-calibration N"
+    usage = "uso: laya_call.py status|init|tasks|new-task N|ask N [--teacher]|correct N|stats N [--last N]|export N|import-model N REPO|set-calibration N"
     if len(argv) < 2:
         print(usage, file=sys.stderr)
         sys.exit(64)
@@ -333,6 +409,15 @@ def main(argv):
             cmd_ask(plain[0], "--teacher" in args)
         elif cmd == "correct" and plain:
             cmd_correct(plain[0])
+        elif cmd == "stats" and plain:
+            last = 50
+            if "--last" in args:
+                try:
+                    last = max(1, int(args[args.index("--last") + 1]))
+                except (IndexError, ValueError):
+                    fail("--last precisa de um número", 64)
+                plain = [a for a in plain if a != str(args[args.index("--last") + 1])]
+            cmd_stats(plain[0], last)
         elif cmd == "export" and plain:
             cmd_export(plain[0])
         elif cmd == "import-model" and len(plain) >= 2:

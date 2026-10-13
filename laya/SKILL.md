@@ -1,6 +1,6 @@
 ---
 name: laya
-description: Integra o modelo Laya (convaiinnovations) rodando localmente para decisões estruturadas choice, score e noul, com tarefas que acumulam exemplos e modelos ajustados salvos em LAYA_HOME (padrão `~/.laya`). Pode usar o Jev como professor. Somente invocação explícita pelo usuário - "$laya on", "$laya off", "$laya status", "$laya tasks" ou "$laya ask" (ou "/laya ..."). Nunca use por conta própria.
+description: Integra o modelo Laya (convaiinnovations) rodando localmente para decisões estruturadas choice, score e noul, com tarefas que acumulam exemplos e modelos ajustados salvos em LAYA_HOME (padrão `~/.laya`). Pode usar o Jev como professor. Somente invocação explícita pelo usuário - "$laya on", "$laya off", "$laya status", "$laya tasks", "$laya stats" ou "$laya ask" (ou "/laya ..."). Nunca use por conta própria.
 disable-model-invocation: true
 allow_implicit_invocation: false
 ---
@@ -36,6 +36,9 @@ Rode `status` e informe: estado, versão do Python, Laya instalado (sim/não), p
 ### `$laya tasks`
 Rode `tasks`. Mostre por tarefa: se tem modelo ajustado, nº de exemplos, acurácia, origem do modelo.
 
+### `$laya stats <nome>`
+Rode `stats <nome>` e mostre a concordância do modo sombra (total e por pergunta), nº de amostras e se está `pronto`.
+
 ### `$laya new <nome>`
 Cria a tarefa. Monte o JSON `{"questions": {...}}` e envie por stdin: `python scripts/laya_call.py new-task <nome> < schema.json`. Nome em minúsculas, números, `-` ou `_`.
 - `choice`: `criteria` é um mapa `opção -> descrição`. **Máximo 20 opções**; acima disso divida em duas etapas.
@@ -62,12 +65,19 @@ Se `needs_review` for `true` (confiança < 0,60, duas maiores probabilidades com
 
 1. **Correção do usuário:** quando ele disser a resposta certa, grave com `correct <tarefa>` (`{"state": "...", "answers": {...}}` no stdin).
 2. **Jev como professor (`--teacher`):** só se o usuário pedir explicitamente **e** o Jev estiver ativo (`$jev on`). Antes, avise que o texto será enviado à API do Jev, e pergunte se os e-mails estão anonimizados. Confira também se os termos da TypeSafe permitem usar as saídas para treinar outro modelo. O script reaproveita `~/.agents/skills/jev/scripts/jev_call.py`, que cuida da chave; esta skill nunca lê chaves.
-3. **Treinar:** com cerca de 100 exemplos, a calibração já ajuda. Com 200+, vale o fine-tuning.
+3. **Modo sombra (modelo principal como professor, grátis):** o principal decide como faria de qualquer forma e manda a própria decisão junto com o pedido. A sugestão do Laya **não é seguida**, só medida.
+   ```
+   python scripts/laya_call.py ask <tarefa> < pedido.json   # {"state": "...", "shadow": {"<pergunta>": "<resposta do principal>"}}
+   ```
+   A resposta do principal vira exemplo (`source: principal`) e o histórico registra se os dois concordaram. Use em tarefas que você mesmo está decidindo, como a `rotear-modelo`.
+   - `stats <tarefa> [--last N]` mostra a concordância das últimas N sombras (padrão 50) com o modelo atual e grava em `acuracia` no registro. `pronto: true` quando passa de 85% com 50+ amostras; aí o Laya pode começar a decidir de verdade.
+   - Concordância mede o quanto o Laya imita o principal, não se o principal acertou. Correções do usuário (`correct`) continuam valendo mais.
+4. **Treinar:** com cerca de 100 exemplos, a calibração já ajuda. Com 200+, vale o fine-tuning.
    - `export <tarefa>` gera `dataset.jsonl`. Peça ao usuário para revisar 50 a 100 linhas à mão.
    - O treino roda no **Kaggle (2x T4 grátis)** ou Colab, com o notebook oficial do Laya. **Esta skill não treina** e nunca dispara treino sozinha.
    - O notebook envia o resultado ao Hub do usuário. Depois: `import-model <tarefa> <usuario/repo>` baixa para `tasks/<nome>/model` (token só se o repositório for privado, e fora do chat).
    - Guarde as temperaturas que o notebook produzir com `set-calibration <tarefa>`.
-4. Antes de dizer que ficou bom, meça: separe 50 exemplos conhecidos e compare. Acima de 85 a 90% e com erro de baixo custo, pode usar.
+5. Antes de dizer que ficou bom, meça: separe 50 exemplos conhecidos e compare. Acima de 85 a 90% e com erro de baixo custo, pode usar.
 
 ## Estado final (obrigatório)
 
